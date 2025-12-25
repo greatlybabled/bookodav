@@ -14,15 +14,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 10
+      
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
           cache: 'pnpm'
-      
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 10
       
       - name: Install build tools
         run: |
@@ -37,5 +37,3 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           wranglerVersion: "3.111.0"
-          secrets: |
-            DATABASE_URL
