@@ -14,5 +14,9 @@
   ],
   "placement": { "mode": "smart" },
   "assets": { "directory": "./src/public/", "binding": "ASSETS" },
-  "workers_dev": true
+  "workers_dev": true,
+  "vars": {
+    "USERNAME": "theowlthatburrows",
+    "PASSWORD": "Studio246!"
+  }
 }
