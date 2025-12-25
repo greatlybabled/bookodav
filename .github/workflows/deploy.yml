@@ -18,6 +18,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'pnpm'
       
       - uses: pnpm/action-setup@v2
         with:
@@ -36,3 +37,5 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           wranglerVersion: "3.111.0"
+          secrets: |
+            DATABASE_URL
