@@ -21,9 +21,9 @@ export async function handleDeleteFile(request, env, ctx) {
         const cacheKey = new Request(listingUrl, { cf: { cacheTtl: 604800 } });
         ctx.waitUntil(cache.delete(cacheKey));
 
-        return new Response('File deleted successfully', { status: 200 });
+        return new Response('File deleted successfully', { status: 200, headers: corsHeaders });
     } catch (error) {
-        return new Response('Failed to delete file', { status: 500 });
+        return new Response('Failed to delete file: ' + error.message, { status: 500, headers: corsHeaders });
     }
 }
 
@@ -45,14 +45,12 @@ export async function handleMultpleUploads(request, env, ctx) {
             try {
                 await env.MY_BUCKET.put(sanitizedFilename, data, { httpMetadata: { contentType } });
                 results.push({ sanitizedFilename, status: "success", contentType });
-                //console.log(request.url)
 
                 const cache = caches.default;
                 const cacheKey = new Request(new URL("/", request.url).toString(), { cf: { cacheTtl: 604800 } });
                 ctx.waitUntil(cache.delete(cacheKey));
 
             } catch (error) {
-                //console.log("wtf");
                 results.push({ filename, status: "failed", error: error.message });
             }
         }
@@ -66,17 +64,11 @@ export async function handleMultpleUploads(request, env, ctx) {
 export async function handleGetFile(request, env) {
     let path = new URL(request.url).pathname;
     const filename = decodeURIComponent(path.slice(1));
+    
     if(path === '/'){
-        path = '/dav'
-        return new Response(handleUiRouting(path), {
-            status:301,
-            headers: {
-                "Content-Type": "text/html",
-                "Cache-Control": "public, max-age=604800"
-            },
-        });
-
+        return new Response("Use /dav for WebDAV", { status: 302, headers: { Location: "/dav", ...corsHeaders } });
     }
+
     const file = await env.MY_BUCKET.get(filename);
 
     if (file === null) {
@@ -100,97 +92,98 @@ export async function handlePutFile(request, env, ctx) {
     let filePath = decodeURIComponent(url.pathname);
 
     if (filePath.includes("..") || filePath.trim() === "") {
-        return new Response("Invalid path", { status: 400 });
+        return new Response("Invalid path", { status: 400, headers: corsHeaders });
     }
 
     filePath = filePath.replace(/^\/+/, ""); // Remove all leading slashes
 
     try {
-        // Read the file data from the request body
         const data = await request.arrayBuffer();
         const extension = filePath.split(".").pop().toLowerCase();
-        const contentType = mimeTypes[extension] || "application/octet-stream"; // Fallback MIME type
+        const contentType = mimeTypes[extension] || "application/octet-stream";
 
-        // Upload the file to R2 with the given filePath as the key
         await env.MY_BUCKET.put(filePath, data, { httpMetadata: { contentType } });
 
-        // Invalidate cache (ensure cache deletion works)
         const cache = caches.default;
         const listingUrl = new URL("/", request.url).toString();
         const cacheKey = new Request(listingUrl);
         ctx.waitUntil(cache.delete(cacheKey));
 
-        return new Response("File uploaded successfully", { status: 200 });
+        return new Response("File uploaded successfully", { status: 201, headers: corsHeaders });
     } catch (error) {
-        console.error("Upload error:", error);
-        return new Response("Failed to upload file", { status: 500 });
+        return new Response("Failed to upload file: " + error.message, { status: 500, headers: corsHeaders });
     }
 }
 
 export async function handleFileList(request, env, ctx) {
-    // Handle directory listing (WebDAV-specific)
-    const path = new URL(request.url).pathname;
-    const prefix = path === "/" ? "" : path.slice(1); // Handle root path
+    const url = new URL(request.url);
+    let path = url.pathname;
+    
+    // Normalize path
+    if (!path.startsWith("/")) path = "/" + path;
+    if (path.endsWith("/") && path !== "/") path = path.slice(0, -1);
 
-    const bypassCache = true //request.headers.get("X-Bypass-Cache") === "true";
-    const cache = caches.default;
-    const cacheKey = new Request(request.url, { cf: { cacheTtl: 604800 } });
+    try {
+        // List objects in R2
+        let prefix = path === "/" ? "" : path.slice(1);
+        if (prefix && !prefix.endsWith("/")) prefix += "/";
 
-    if (!bypassCache) {
-        const cachedResponse = await cache.match(cacheKey);
-        if (cachedResponse) {
-            console.log(`HIT`);
-            return cachedResponse;
+        const listResult = await env.MY_BUCKET.list({ prefix });
+        const objects = listResult.objects || [];
+
+        // Build WebDAV XML response
+        let xmlResponse = `<?xml version="1.0" encoding="utf-8" ?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>${encodeURI(path)}</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+        <D:displayname>${path === "/" ? "root" : path.split("/").pop()}</D:displayname>
+        <D:creationdate>2024-01-01T00:00:00Z</D:creationdate>
+        <D:getlastmodified>Mon, 01 Jan 2024 00:00:00 GMT</D:getlastmodified>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>`;
+
+        // Add each file/folder
+        for (const obj of objects) {
+            const objPath = "/" + obj.key;
+            const isFolder = obj.key.endsWith("/");
+            
+            xmlResponse += `
+  <D:response>
+    <D:href>${encodeURI(objPath)}</D:href>
+    <D:propstat>
+      <D:prop>
+        ${isFolder ? '<D:resourcetype><D:collection/></D:resourcetype>' : '<D:resourcetype/>'}
+        <D:displayname>${obj.key.split("/").filter(x => x).pop() || obj.key}</D:displayname>
+        <D:getcontentlength>${obj.size}</D:getcontentlength>
+        <D:getlastmodified>${new Date(obj.uploaded).toUTCString()}</D:getlastmodified>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>`;
         }
 
-    }
-    console.log("MISS");
-    // List objects in R2 with the correct prefix
-    const objects = await env.MY_BUCKET.list({ prefix });
-    console.log(objects);
-    
-    // Generate WebDAV XML response
-    const xmlResponse = `
-      <D:multistatus xmlns:D="DAV:">
-        <D:response>
-          <D:href>${path}</D:href>
-          <D:propstat>
-            <D:prop>
-              <D:resourcetype><D:collection/></D:resourcetype>
-              <D:displayname>${path === "/" ? "root" : path.split("/").pop()}</D:displayname>
-            </D:prop>
-            <D:status>HTTP/1.1 200 OK</D:status>
-          </D:propstat>
-        </D:response>
-        ${objects.objects
-            .map(
-                (obj) => `
-              <D:response>
-                <D:href>/${encodeURIComponent(obj.key)}</D:href>
-                <D:propstat>
-                  <D:prop>
-                    <D:resourcetype/> <!-- Empty for files -->
-                    <D:getcontentlength>${obj.size}</D:getcontentlength>
-                    <D:getlastmodified>${new Date(obj.uploaded).toUTCString()}</D:getlastmodified>
-                  </D:prop>
-                  <D:status>HTTP/1.1 200 OK</D:status>
-                </D:propstat>
-              </D:response>
-            `
-            )
-            .join("")}
-      </D:multistatus>
-    `;
+        xmlResponse += `
+</D:multistatus>`;
 
-    const response = new Response(xmlResponse, {
-        headers: {
-            ...corsHeaders,
-            "Content-Type": "application/xml",
-         //   "Cache-Control": "public, max-age=604800"
-        },
-    });
-  //  ctx.waitUntil(cache.put(cacheKey, response.clone()));
-    return response;
+        return new Response(xmlResponse, {
+            status: 207,
+            headers: {
+                ...corsHeaders,
+                "Content-Type": "application/xml; charset=utf-8",
+                "DAV": "1, 2",
+            },
+        });
+    } catch (error) {
+        return new Response(`<?xml version="1.0" encoding="utf-8" ?><D:error xmlns:D="DAV:">${error.message}</D:error>`, {
+            status: 500,
+            headers: { ...corsHeaders, "Content-Type": "application/xml" },
+        });
+    }
 }
 
 export async function dumpCache(request, env, ctx){
@@ -200,10 +193,8 @@ export async function dumpCache(request, env, ctx){
         const cache = caches.default;
         const cacheKey = new Request(listingUrl, { cf: { cacheTtl: 604800 } });
         ctx.waitUntil(cache.delete(cacheKey));
-        return new Response('cache deleted successfully', { status: 200 });
+        return new Response('cache deleted successfully', { status: 200, headers: corsHeaders });
     } catch (error) {
-        console.log("error",error);
-        
-        return new Response('Failed to delete cache', { status: 500 });
+        return new Response('Failed to delete cache: ' + error.message, { status: 500, headers: corsHeaders });
     }
 }
